@@ -1,0 +1,63 @@
+name: AWS SSM Fetch
+description: Assume the per-repo OIDC role and fetch SSM SecureString params into masked env vars.
+inputs:
+  role-arn:
+    description: AWS IAM role ARN to assume (typically ${{ vars.AWS_ROLE_ARN }}).
+    required: true
+  aws-region:
+    description: AWS region (typically ${{ vars.AWS_REGION }}).
+    required: true
+  params:
+    description: |
+      Newline-separated SSM-path→env-var mapping. Each line: `<ssm-path><whitespace><ENV_VAR>`.
+      Example:
+        /providers/messaging/slack/main/bot-token   SLACK_BOT_TOKEN
+        /providers/messaging/slack/main/channel-id  SLACK_CHANNEL_ID
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Assume AWS role via OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+    - name: Fetch SSM parameters
+      shell: bash
+      env:
+        PARAMS: ${{ inputs.params }}
+      run: |
+        set -euo pipefail
+        # Collect requested SSM paths
+        names=()
+        declare -A pathToVar=()
+        while IFS= read -r line; do
+          [[ -z "${line// /}" ]] && continue
+          path="${line%%[[:space:]]*}"
+          var="${line##*[[:space:]]}"
+          names+=("$path")
+          pathToVar["$path"]="$var"
+        done <<< "$PARAMS"
+
+        # Batched fetch (10 at a time is the GetParameters limit).
+        i=0
+        while [ "$i" -lt "${#names[@]}" ]; do
+          batch=("${names[@]:$i:10}")
+          aws ssm get-parameters --with-decryption --names "${batch[@]}" \
+            --query 'Parameters[*].[Name,Value]' --output text |
+          while IFS=$'\t' read -r name value; do
+            var="${pathToVar[$name]}"
+            # Mask each line of the value (handles multi-line PEMs).
+            while IFS= read -r vline; do
+              [[ -z "$vline" ]] || echo "::add-mask::$vline"
+            done <<< "$value"
+            # Emit as GITHUB_ENV — encode multi-line via random delimiter per the docs.
+            delim="ghadelim_$RANDOM$RANDOM"
+            {
+              echo "$var<<$delim"
+              echo "$value"
+              echo "$delim"
+            } >> "$GITHUB_ENV"
+          done
+          i=$((i + 10))
+        done
