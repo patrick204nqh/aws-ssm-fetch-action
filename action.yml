@@ -2,10 +2,10 @@ name: AWS SSM Fetch
 description: Assume the per-repo OIDC role and fetch SSM SecureString params into masked env vars.
 inputs:
   role-arn:
-    description: AWS IAM role ARN to assume (typically ${{ vars.AWS_ROLE_ARN }}).
+    description: "AWS IAM role ARN to assume (typically vars.AWS_ROLE_ARN)."
     required: true
   aws-region:
-    description: AWS region (typically ${{ vars.AWS_REGION }}).
+    description: "AWS region (typically vars.AWS_REGION)."
     required: true
   params:
     description: |
