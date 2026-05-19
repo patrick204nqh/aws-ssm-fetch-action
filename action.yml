@@ -28,36 +28,22 @@ runs:
         PARAMS: ${{ inputs.params }}
       run: |
         set -euo pipefail
-        # Collect requested SSM paths
-        names=()
-        declare -A pathToVar=()
+        # Process one parameter per aws call. Avoids the tab-separated --output text
+        # parsing bug where multi-line values (PEMs) break line-based read loops.
         while IFS= read -r line; do
           [[ -z "${line// /}" ]] && continue
           path="${line%%[[:space:]]*}"
           var="${line##*[[:space:]]}"
-          names+=("$path")
-          pathToVar["$path"]="$var"
+          value=$(aws ssm get-parameter --with-decryption --name "$path" --query 'Parameter.Value' --output text)
+          # Mask each line of the value so multi-line PEMs don't leak.
+          while IFS= read -r vline; do
+            [[ -z "$vline" ]] || echo "::add-mask::$vline"
+          done <<< "$value"
+          # Emit to GITHUB_ENV via heredoc form so multi-line values survive.
+          delim="ghadelim_$RANDOM$RANDOM"
+          {
+            echo "$var<<$delim"
+            echo "$value"
+            echo "$delim"
+          } >> "$GITHUB_ENV"
         done <<< "$PARAMS"
-
-        # Batched fetch (10 at a time is the GetParameters limit).
-        i=0
-        while [ "$i" -lt "${#names[@]}" ]; do
-          batch=("${names[@]:$i:10}")
-          aws ssm get-parameters --with-decryption --names "${batch[@]}" \
-            --query 'Parameters[*].[Name,Value]' --output text |
-          while IFS=$'\t' read -r name value; do
-            var="${pathToVar[$name]}"
-            # Mask each line of the value (handles multi-line PEMs).
-            while IFS= read -r vline; do
-              [[ -z "$vline" ]] || echo "::add-mask::$vline"
-            done <<< "$value"
-            # Emit as GITHUB_ENV — encode multi-line via random delimiter per the docs.
-            delim="ghadelim_$RANDOM$RANDOM"
-            {
-              echo "$var<<$delim"
-              echo "$value"
-              echo "$delim"
-            } >> "$GITHUB_ENV"
-          done
-          i=$((i + 10))
-        done
